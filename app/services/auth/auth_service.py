@@ -69,20 +69,22 @@ class AuthService:
             user = await self.auth_repository.get_user_by_phone(phone_number)
             if user:
                 user_id = str(user["_id"])
-                logger.info(f"Existing user found with ID: {user_id} for phone: {phone_number}")
+                roles = [user.get("role", "user")]
+                logger.info(f"Existing user found with ID: {user_id} and roles: {roles} for phone: {phone_number}")
             else:
                 user_id = await self.auth_repository.create_user(phone_number)
                 if not user_id:
                     logger.error(f"Failed to create user for phone: {phone_number}")
                     raise HTTPException(status_code=500, detail="Failed to create user account.")
+                roles = ["user"]  # برای کاربر جدید پیش‌فرض user
                 logger.info(f"New user created with ID: {user_id} for phone: {phone_number}")
 
-            access_token = self.jwt_manager.create_access_token(user_id, ["user"])
+            access_token = self.jwt_manager.create_access_token(user_id, roles)  # استفاده از نقش‌های دیتابیس
             refresh_token = self.jwt_manager.create_refresh_token(user_id)
 
+            session_id = f"session-{otp_code}"
             user_agent_str = http_request.headers.get("User-Agent", "unknown") if http_request else "unknown"
             user_agent = parse(user_agent_str)
-            session_id = f"session-{otp_code}"
             device_info = {
                 "device": user_agent.device.family,
                 "browser": user_agent.browser.family,
@@ -176,22 +178,6 @@ class AuthService:
             logger.error(f"Unexpected error in get_active_sessions for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error retrieving sessions.")
 
-    async def force_logout(self, user_id: str) -> dict:
-        try:
-            if not user_id:
-                logger.error("User ID is empty in force_logout.")
-                raise HTTPException(status_code=400, detail="User ID cannot be empty.")
-
-            self.redis_service.delete_all_sessions(user_id)
-            self.blacklist_service.add_to_blacklist(user_id)
-            logger.info(f"All sessions forcibly logged out for user: {user_id}")
-            return {"message": "All user sessions terminated."}
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in force_logout for user {user_id}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error during force logout.")
-
     async def request_account_deletion(self, phone_number: str, otp_code: str) -> dict:
         try:
             if not phone_number or not otp_code:
@@ -219,3 +205,49 @@ class AuthService:
         except Exception as e:
             logger.error(f"Unexpected error in request_account_deletion for {phone_number}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error requesting account deletion.")
+
+    async def force_logout(self, user_id: str) -> dict:
+        try:
+            if not user_id:
+                logger.error("User ID is empty in force_logout.")
+                raise HTTPException(status_code=400, detail="User ID cannot be empty.")
+
+            logger.info(f"Attempting to force logout for user_id: {user_id}")
+
+            # چک کردن وجود کاربر در دیتابیس
+            user = await self.auth_repository.get_user_by_id(user_id)
+            if not user:
+                logger.warning(f"No user found with ID: {user_id}")
+                raise HTTPException(status_code=404, detail="User not found.")
+
+            # چک کردن وجود جلسات یا توکن‌ها
+            sessions_before = self.redis_service.get_user_sessions(user_id)
+            refresh_tokens = self.redis_service.get_all_refresh_tokens(user_id)
+            if not sessions_before and not refresh_tokens:
+                logger.warning(f"No active sessions or tokens found for user: {user_id}")
+                raise HTTPException(status_code=404, detail="No active sessions or tokens found for this user.")
+
+            # لاگ تعداد جلسات و توکن‌ها قبل از پاک کردن
+            logger.debug(f"Sessions before force logout for {user_id}: {len(sessions_before)}")
+            logger.debug(f"Refresh tokens before force logout for {user_id}: {len(refresh_tokens)}")
+
+            # پاک کردن همه جلسات
+            self.redis_service.delete_all_sessions(user_id)
+
+            # باطل کردن همه refresh token‌ها
+            if refresh_tokens:
+                for token in refresh_tokens:
+                    self.blacklist_service.add_to_blacklist(token)
+                self.redis_service.delete_all_refresh_tokens(user_id)
+
+            # لاگ تعداد جلسات بعد از پاک کردن
+            sessions_after = self.redis_service.get_user_sessions(user_id)
+            logger.debug(f"Sessions after force logout for {user_id}: {len(sessions_after)}")
+
+            logger.info(f"Forced logout completed for user: {user_id}")
+            return {"message": "All sessions and tokens terminated."}
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error in force_logout for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error during force logout.")

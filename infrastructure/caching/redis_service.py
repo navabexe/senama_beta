@@ -212,7 +212,7 @@ class RedisService:
                     oldest_key = min(current_sessions.keys(), key=lambda k: current_sessions[k]["created_at"])
                     self.delete_session(user_id, oldest_key.split(":")[-1])
                     if self.notification_service:
-                        self.notification_service.send_notification(  # استفاده از نسخه sync
+                        self.notification_service.send_notification_sync(  # اصلاح به sync
                             user_id, "Session Limit Reached", "Oldest session terminated due to new login."
                         )
                     logger.info(f"Removed oldest session for user {user_id} due to limit.")
@@ -278,9 +278,12 @@ class RedisService:
                 raise HTTPException(status_code=400, detail="User ID cannot be empty.")
             if self.client:
                 session_keys = self.client.keys(f"session:{user_id}:*")
-                for key in session_keys:
-                    self.client.delete(key)
-                logger.debug(f"Deleted all sessions for user {user_id}")
+                if session_keys:
+                    for key in session_keys:
+                        self.client.delete(key)
+                    logger.debug(f"Deleted {len(session_keys)} sessions for user: {user_id}")
+                else:
+                    logger.debug(f"No sessions found to delete for user: {user_id}")
             else:
                 logger.warning(f"Redis unavailable, skipping delete_all_sessions for user {user_id}")
         except HTTPException as e:

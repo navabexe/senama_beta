@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from infrastructure.database.client import DatabaseClient
-from app.security.hashing import Hashing  # کلاس Hashing رو وارد می‌کنید
+from app.security.hashing import Hashing
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,10 @@ async def initialize_database():
             print("Admin user already exists.")
             return
 
-        # ساختن یه نمونه از Hashing
-        hashing = Hashing()  # اینجا نمونه می‌سازید
+        hashing = Hashing()
         admin_user = {
-            "phone_number": "+989123456789",
             "username": "admin",
-            "password": hashing.hash_password("Admin@123"),  # از نمونه استفاده می‌کنید
+            "password": hashing.hash_password("Admin@123"),
             "role": "admin",
             "status": "active",
             "created_at": datetime.now(timezone.utc),
