@@ -1,3 +1,4 @@
+# app/api/v1/auth/auth_routes.py
 import logging
 from datetime import datetime, timezone
 
@@ -6,7 +7,7 @@ from app.security.jwt import JWTManager
 from app.services.auth.auth_service import AuthService
 from app.services.auth.otp_service import OTPService
 from app.services.auth.token_service import TokenService
-from app.domain.schemas.auth_schema import LoginRequest, OTPVerificationRequest, TokenResponse
+from app.domain.schemas.auth_schema import LoginRequest, OTPVerificationRequest, TokenResponse, OTPResponse
 from app.middleware.rbac import role_based_access_control, get_jwt_manager
 
 logger = logging.getLogger(__name__)
@@ -24,23 +25,27 @@ except Exception as e:
     logger.error(f"Failed to initialize authentication services: {str(e)}", exc_info=True)
     raise Exception("Service initialization failed.")
 
-@router.post("/register", response_model=dict)
-async def register_user(request: LoginRequest):
+@router.post("/login", response_model=OTPResponse)
+async def login_user(request: LoginRequest):
     """
-    Register a new user by sending an OTP.
+    Initiates login or registration by sending an OTP.
+    If the user exists, it's a login OTP; if not, it's a registration OTP.
     """
     try:
-        result = await auth_service.register_user(request)
-        logger.info(f"User registration initiated for phone: {request.phone_number}")
-        return result
+        result = await auth_service.login(request)
+        logger.info(f"OTP sent for phone: {request.phone_number}, action: {result['action']}")
+        return OTPResponse(**result)
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error during user registration: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during registration.")
+        logger.error(f"Error during login for {request.phone_number}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error during login.")
 
 @router.post("/verify-otp", response_model=TokenResponse)
 async def verify_otp(request: OTPVerificationRequest, http_request: Request):
+    """
+    Verifies the OTP and either registers a new user or logs in an existing user.
+    """
     try:
         result = await auth_service.verify_otp(request, http_request)
         logger.info(f"OTP verified successfully for phone: {request.phone_number}")
@@ -50,21 +55,6 @@ async def verify_otp(request: OTPVerificationRequest, http_request: Request):
     except Exception as e:
         logger.error(f"Error during OTP verification: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during OTP verification.")
-
-@router.post("/login", response_model=dict)
-async def login_user(request: LoginRequest):
-    """
-    Log in a user and send an OTP.
-    """
-    try:
-        result = await auth_service.login(request)
-        logger.info(f"Login OTP sent for phone: {request.phone_number}")
-        return result
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error during user login: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during login.")
 
 @router.post("/refresh-token", response_model=TokenResponse)
 async def refresh_token(refresh_token: str = Body(..., embed=True)):
@@ -119,24 +109,26 @@ async def force_logout_admin(user_id: str = Body(..., embed=True)):
         logger.error(f"Error during force logout: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during force logout.")
 
-@router.post("/send-otp", response_model=dict)
+@router.post("/send-otp", response_model=OTPResponse)
 async def send_otp(phone_number: str = Body(..., embed=True)):
     """
-    Send an OTP to a user's phone number.
+    Send an OTP to a user's phone number (for testing or additional flows).
     """
     try:
         if not phone_number:
             raise HTTPException(status_code=400, detail="Phone number is required.")
-        result = await otp_service.send_otp(phone_number)
-        logger.info(f"OTP sent successfully to phone: {phone_number}")
-        return result
+        user = await auth_service.auth_repository.get_user_by_phone(phone_number)
+        otp_type = "login" if user else "register"
+        otp_code, otp_id = auth_service.otp_manager.generate_otp(phone_number, otp_type)
+        await auth_service.sms_service.send_sms(phone_number, f"Your OTP code: {otp_code}")
+        logger.info(f"OTP sent successfully to phone: {phone_number}, action: {otp_type}")
+        return OTPResponse(message=f"OTP sent for {otp_type}.", otp_id=otp_id, action=otp_type)
     except HTTPException as e:
         raise e
     except Exception as e:
         logger.error(f"Error sending OTP to {phone_number}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error sending OTP.")
 
-# تابع کمکی برای نقش user
 async def user_role_check(request: Request, jwt_manager: JWTManager = Depends(get_jwt_manager)):
     await role_based_access_control(request, ["user"], jwt_manager)
     return True
@@ -165,7 +157,7 @@ async def request_account_deletion(request: OTPVerificationRequest):
     Request account deletion by verifying OTP.
     """
     try:
-        result = await auth_service.request_account_deletion(request.phone_number, request.otp_code)
+        result = await auth_service.request_account_deletion(request.phone_number, request.otp_code, request.otp_id)
         logger.info(f"Account deletion requested for phone: {request.phone_number}")
         return result
     except HTTPException as e:
@@ -173,7 +165,6 @@ async def request_account_deletion(request: OTPVerificationRequest):
     except Exception as e:
         logger.error(f"Error during account deletion request for {request.phone_number}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during account deletion request.")
-
 
 from app.security.hashing import Hashing
 
@@ -200,7 +191,6 @@ async def login_with_password(username: str = Body(...), password: str = Body(..
 
         session_id = f"session-{datetime.now(timezone.utc).isoformat()}"
         user_agent_str = http_request.headers.get("User-Agent", "unknown") if http_request else "unknown"
-        from user_agents import parse
         user_agent = parse(user_agent_str)
         device_info = {
             "device": user_agent.device.family,

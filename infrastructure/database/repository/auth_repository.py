@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import HTTPException
-from pymongo.synchronous.collection import Collection
+from motor.motor_asyncio import AsyncIOMotorCollection
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,8 @@ class AuthRepository:
     def __init__(self):
         from infrastructure.database.client import DatabaseClient
         self.db = DatabaseClient.get_database()
-        self.users: Collection = self.db["users"]
+        self.users: AsyncIOMotorCollection = self.db["users"]
+
 
     async def store_session(self, user_id: str, session_id: str, device_info: dict):
         """
@@ -98,25 +99,9 @@ class AuthRepository:
             logger.error(f"Unexpected error in delete_all_sessions for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error deleting all sessions.")
 
-    async def get_user_by_phone(self, phone_number: str) -> Optional[dict]:
-        """
-        Retrieves a user by phone number from the database.
-        """
-        try:
-            if not phone_number:
-                logger.error("Phone number is empty in get_user_by_phone.")
-                raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
-            user = await self.users.find_one({"phone_number": phone_number})
-            if user:
-                logger.debug(f"User found for phone: {phone_number}")
-            else:
-                logger.debug(f"No user found for phone: {phone_number}")
-            return user
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in get_user_by_phone for {phone_number}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error retrieving user.")
+    def _normalize_phone(self, phone_number: str) -> str:
+        """Normalize phone number by removing spaces and dashes."""
+        return phone_number.replace(" ", "").replace("-", "")
 
     async def get_user_by_username(self, username: str) -> Optional[dict]:
         """
@@ -143,11 +128,12 @@ class AuthRepository:
         Creates a new user in the database with a phone number.
         """
         try:
-            if not phone_number:
+            normalized_phone = self._normalize_phone(phone_number)
+            if not normalized_phone:
                 logger.error("Phone number is empty in create_user.")
                 raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
             user = {
-                "phone_number": phone_number,
+                "phone_number": normalized_phone,
                 "role": "user",
                 "status": "active",
                 "created_at": datetime.now(timezone.utc),
@@ -155,9 +141,9 @@ class AuthRepository:
             }
             result = await self.users.insert_one(user)
             if not result.inserted_id:
-                logger.error(f"Failed to insert user for phone: {phone_number}")
+                logger.error(f"Failed to insert user for phone: {normalized_phone}")
                 raise HTTPException(status_code=500, detail="Failed to create user.")
-            logger.info(f"User created with ID {result.inserted_id} for phone: {phone_number}")
+            logger.info(f"User created with ID {result.inserted_id} for phone: {normalized_phone}")
             return str(result.inserted_id)
         except HTTPException as e:
             raise e
@@ -171,8 +157,7 @@ class AuthRepository:
         """
         try:
             if not user_id or not status:
-                logger.error(
-                    f"User ID or status is empty in update_user_status. user_id: {user_id}, status: {status}")
+                logger.error(f"User ID or status is empty in update_user_status. user_id: {user_id}, status: {status}")
                 raise HTTPException(status_code=400, detail="User ID and status cannot be empty.")
             result = await self.users.update_one(
                 {"_id": user_id},
@@ -197,8 +182,6 @@ class AuthRepository:
             if not user_id:
                 logger.error("User ID is empty in get_user_by_id.")
                 raise HTTPException(status_code=400, detail="User ID cannot be empty.")
-
-            # چک کردن فرمت ObjectId و جستجو
             try:
                 oid = ObjectId(user_id)
                 user = await self.users.find_one({"_id": oid})
@@ -209,11 +192,29 @@ class AuthRepository:
                     logger.debug(f"No user found for ID: {user_id}")
                     raise HTTPException(status_code=404, detail="User not found.")
             except ValueError:
-                # وقتی user_id یه ObjectId معتبر نیست (طول اشتباه یا فرمت نادرست)
                 logger.warning(f"Invalid ObjectId format for user_id: {user_id}")
                 raise HTTPException(status_code=404, detail="User not found (invalid ID format).")
         except HTTPException as e:
             raise e
         except Exception as e:
             logger.error(f"Unexpected error in get_user_by_id for {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error retrieving user.")
+
+    async def get_user_by_phone(self, phone_number: str) -> Optional[dict]:
+        try:
+            normalized_phone = self._normalize_phone(phone_number)
+            if not normalized_phone:
+                logger.error("Phone number is empty in get_user_by_phone.")
+                raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
+            user = await self.users.find_one({"phone_number": normalized_phone})
+            logger.debug(f"Database query for phone {normalized_phone}: {user}")
+            if user:
+                logger.debug(f"User found for phone: {normalized_phone}")
+            else:
+                logger.debug(f"No user found for phone: {normalized_phone}")
+            return user
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error in get_user_by_phone for {phone_number}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error retrieving user.")

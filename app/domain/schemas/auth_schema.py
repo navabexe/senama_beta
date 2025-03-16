@@ -24,16 +24,30 @@ class LoginRequest(BaseModel):
             logger.error(f"Validation error in LoginRequest: {str(e)}", exc_info=True)
             raise ValueError(f"Invalid LoginRequest data: {str(e)}")
 
+class OTPResponse(BaseModel):
+    """
+    Data model for OTP request response, including a unique OTP identifier and action type.
+    """
+    message: str = Field(..., example="OTP sent for login.", description="Response message")
+    otp_id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000", description="Unique OTP identifier")
+    action: str = Field(..., example="login", description="Action type: 'login' or 'register'")
+
+    class Config:
+        json_schema_extra = {
+            "example": {"message": "OTP sent for login.", "otp_id": "550e8400-e29b-41d4-a716-446655440000", "action": "login"}
+        }
+
 class OTPVerificationRequest(BaseModel):
     """
     Data model for OTP verification request.
     """
     phone_number: str = Field(..., example="+989123456789", description="User's phone number in international format.")
     otp_code: str = Field(..., min_length=6, max_length=6, example="123456", description="6-digit OTP code.")
+    otp_id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000", description="Unique OTP identifier")
 
     class Config:
         json_schema_extra = {
-            "example": {"phone_number": "+989123456789", "otp_code": "123456"}
+            "example": {"phone_number": "+989123456789", "otp_code": "123456", "otp_id": "550e8400-e29b-41d4-a716-446655440000"}
         }
 
     @classmethod

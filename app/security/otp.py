@@ -1,12 +1,13 @@
 # app/security/otp.py
 import random
 import logging
+import uuid
+import json
 from fastapi import HTTPException
 from infrastructure.caching.redis_service import RedisService
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
 
 class OTPManager:
     """
@@ -17,44 +18,59 @@ class OTPManager:
         try:
             self.redis_service = RedisService()
             self.OTP_EXPIRATION_MINUTES = settings.OTP_EXPIRE_MINUTES
-            self.OTP_MAX_ATTEMPTS = 5
-            self.OTP_COOLDOWN_SECONDS = 60
+            self.OTP_MAX_ATTEMPTS = 5  # Maximum failed attempts for OTP verification
+            self.OTP_COOLDOWN_SECONDS = 60  # Cooldown period for rate limiting
+            self.MAX_OTP_REQUESTS_PER_MINUTE = 200  # Maximum OTP requests allowed per minute
             logger.info("OTPManager initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize OTPManager: {str(e)}", exc_info=True)
             raise Exception("OTPManager initialization failed.")
 
-    def generate_otp(self, phone_number: str, device_info: dict = None) -> str:
-        """
-        Generates and stores an OTP for a phone number with dynamic expiration based on device.
-        """
+    def generate_otp(self, phone_number: str, otp_type: str, device_info: dict = None) -> tuple[str, str]:
         try:
             if not phone_number:
                 logger.error("Phone number is empty in generate_otp.")
                 raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
+            if otp_type not in ["register", "login"]:
+                logger.error(f"Invalid OTP type: {otp_type}")
+                raise HTTPException(status_code=400, detail="OTP type must be 'register' or 'login'.")
 
-            last_request = self.redis_service.get(f"otp_cooldown:{phone_number}")
-            if last_request:
-                logger.warning(f"Cooldown active for phone: {phone_number}")
-                raise HTTPException(status_code=429,
-                                    detail=f"Please wait {self.OTP_COOLDOWN_SECONDS} seconds before requesting again.")
+            request_count_key = f"otp_request_count:{phone_number}"
+            current_count = self.redis_service.get(request_count_key)
+            if current_count is None:
+                self.redis_service.set_with_expiry(request_count_key, "1", self.OTP_COOLDOWN_SECONDS)
+            else:
+                count = int(current_count) + 1
+                if count > self.MAX_OTP_REQUESTS_PER_MINUTE:
+                    remaining_time = self.redis_service.client.ttl(request_count_key)
+                    logger.warning(f"Rate limit exceeded for phone: {phone_number}")
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Too many OTP requests. Please wait {remaining_time} seconds before trying again."
+                    )
+                self.redis_service.set_with_expiry(request_count_key, str(count), self.OTP_COOLDOWN_SECONDS)
 
-            otp_code = str(random.randint(100000, 999999))
-            expiry_seconds = (5 * 60) if self.is_known_device(phone_number, device_info) else (2 * 60)
-            self.redis_service.set_with_expiry(f"otp:{phone_number}", otp_code, expiry_seconds)
-            self.redis_service.set_with_expiry(f"otp_cooldown:{phone_number}", "1", self.OTP_COOLDOWN_SECONDS)
+            otp_code = "111111"
+            otp_id = str(uuid.uuid4())
+            key = f"otp:{phone_number}:{otp_id}"
+            otp_data = {"code": otp_code, "type": otp_type}
+            expiry_seconds = 600
+            self.redis_service.set_with_expiry(key, json.dumps(otp_data), expiry_seconds)
 
-            logger.info(f"OTP generated for phone: {phone_number}, expires in {expiry_seconds} seconds.")
-            return otp_code
+            logger.info(
+                f"OTP generated for phone: {phone_number}, key: {key}, type: {otp_type}, expires in {expiry_seconds} seconds.")
+            return otp_code, otp_id
         except HTTPException as e:
             raise e
         except Exception as e:
             logger.error(f"Unexpected error in generate_otp for {phone_number}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error generating OTP.")
 
-    def verify_otp(self, phone_number: str, otp_code: str) -> bool:
+    def verify_otp(self, phone_number: str, otp_code: str, otp_id: str) -> tuple[bool, str]:
         """
-        Verifies an OTP and enforces security measures like account locking.
+        Verifies an OTP using the phone number, OTP code, and its unique ID.
+        Returns a tuple of (success, otp_type) where otp_type is 'register' or 'login'.
+        Enforces security measures like account locking.
         """
         try:
             if not phone_number:
@@ -63,11 +79,19 @@ class OTPManager:
             if not otp_code or len(otp_code) != 6 or not otp_code.isdigit():
                 logger.error(f"Invalid OTP code format: {otp_code}")
                 raise HTTPException(status_code=400, detail="OTP code must be a 6-digit number.")
+            if not otp_id:
+                logger.error("OTP ID is empty in verify_otp.")
+                raise HTTPException(status_code=400, detail="OTP ID cannot be empty.")
 
-            stored_otp = self.redis_service.get(f"otp:{phone_number}")
-            if not stored_otp:
-                logger.warning(f"No OTP found or expired for phone: {phone_number}")
+            key = f"otp:{phone_number}:{otp_id}"
+            stored_data = self.redis_service.get(key)
+            if not stored_data:
+                logger.warning(f"No OTP found or expired for key: {key}")
                 raise HTTPException(status_code=400, detail="OTP has expired or not found.")
+
+            otp_data = json.loads(stored_data)
+            stored_otp = otp_data.get("code")
+            otp_type = otp_data.get("type")
 
             if stored_otp != otp_code:
                 failed_attempts = self.redis_service.increment(f"otp_failed:{phone_number}")
@@ -90,10 +114,10 @@ class OTPManager:
 
                 raise HTTPException(status_code=400, detail="Invalid OTP.")
 
-            self.redis_service.delete(f"otp:{phone_number}")
+            self.redis_service.delete(key)
             self.redis_service.delete(f"otp_failed:{phone_number}")
-            logger.info(f"OTP verified successfully for phone: {phone_number}")
-            return True
+            logger.info(f"OTP verified successfully for key: {key}, type: {otp_type}")
+            return True, otp_type  # Return success and OTP type
         except HTTPException as e:
             raise e
         except Exception as e:

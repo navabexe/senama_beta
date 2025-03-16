@@ -197,38 +197,6 @@ class RedisService:
             logger.error(f"Unexpected error in count_active_refresh_tokens for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error counting refresh tokens.")
 
-    def store_session(self, user_id: str, session_id: str, device_info: dict, expiry_hours: int = 24):
-        try:
-            if not user_id or not session_id or not device_info:
-                logger.error("User ID, session ID, or device info is empty in store_session.")
-                raise HTTPException(status_code=400, detail="User ID, session ID, and device info cannot be empty.")
-            if expiry_hours <= 0:
-                logger.error(f"Invalid expiry_hours: {expiry_hours}")
-                raise HTTPException(status_code=400, detail="Expiry hours must be positive.")
-
-            if self.client:
-                current_sessions = self.get_user_sessions(user_id)
-                if len(current_sessions) >= 5:
-                    oldest_key = min(current_sessions.keys(), key=lambda k: current_sessions[k]["created_at"])
-                    self.delete_session(user_id, oldest_key.split(":")[-1])
-                    if self.notification_service:
-                        self.notification_service.send_notification_sync(  # اصلاح به sync
-                            user_id, "Session Limit Reached", "Oldest session terminated due to new login."
-                        )
-                    logger.info(f"Removed oldest session for user {user_id} due to limit.")
-
-                key = f"session:{user_id}:{session_id}"
-                device_info["created_at"] = datetime.now(timezone.utc).isoformat()
-                self.client.setex(key, timedelta(hours=expiry_hours), json.dumps(device_info))
-                logger.debug(f"Stored session {session_id} for user {user_id}")
-            else:
-                logger.warning(f"Redis unavailable, skipping store_session for user {user_id}")
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in store_session for user {user_id}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error storing session.")
-
     def get_user_sessions(self, user_id: str) -> dict:
         try:
             if not user_id:
@@ -291,3 +259,35 @@ class RedisService:
         except Exception as e:
             logger.error(f"Unexpected error in delete_all_sessions for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error deleting all sessions.")
+
+    async def store_session(self, user_id: str, session_id: str, device_info: dict, expiry_hours: int = 24):
+        try:
+            if not user_id or not session_id or not device_info:
+                logger.error("User ID, session ID, or device info is empty in store_session.")
+                raise HTTPException(status_code=400, detail="User ID, session ID, and device info cannot be empty.")
+            if expiry_hours <= 0:
+                logger.error(f"Invalid expiry_hours: {expiry_hours}")
+                raise HTTPException(status_code=400, detail="Expiry hours must be positive.")
+
+            if self.client:
+                current_sessions = self.get_user_sessions(user_id)
+                if len(current_sessions) >= 10:
+                    oldest_key = min(current_sessions.keys(), key=lambda k: current_sessions[k]["created_at"])
+                    self.delete_session(user_id, oldest_key.split(":")[-1])
+                    if self.notification_service:
+                        await self.notification_service.send_notification(
+                            user_id, "Session Limit Reached", "Oldest session terminated due to new login."
+                        )
+                    logger.info(f"Removed oldest session for user {user_id} due to limit.")
+
+                key = f"session:{user_id}:{session_id}"
+                device_info["created_at"] = datetime.now(timezone.utc).isoformat()
+                self.client.setex(key, timedelta(hours=expiry_hours), json.dumps(device_info))
+                logger.debug(f"Stored session {session_id} for user {user_id}")
+            else:
+                logger.warning(f"Redis unavailable, skipping store_session for user {user_id}")
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error in store_session for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error storing session.")

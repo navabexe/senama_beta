@@ -1,19 +1,27 @@
+# scripts/init_db.py
 import asyncio
 import logging
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from infrastructure.database.client import DatabaseClient
 from app.security.hashing import Hashing
+from pymongo.errors import OperationFailure
 
 logger = logging.getLogger(__name__)
 
 async def initialize_database():
     """
-    Initializes the database with default data, such as an admin user.
+    Initializes the database with default data, such as an admin user, and ensures unique index on phone_number.
     """
     try:
         db = DatabaseClient.get_database()
         users_collection = db["users"]
+
+        try:
+            await users_collection.create_index([("phone_number", 1)], unique=True)
+            logger.info("Unique index created on 'phone_number' in 'users' collection.")
+        except OperationFailure as e:
+            logger.warning(f"Failed to create unique index on 'phone_number', might already exist: {str(e)}")
 
         existing_admin = await users_collection.find_one({"role": "admin"})
         if existing_admin:
