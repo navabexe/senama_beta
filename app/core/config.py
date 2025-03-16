@@ -55,6 +55,7 @@ class Settings(BaseSettings):
         case_sensitive=False
     )
 
+
     def __init__(self, **values):
         try:
             super().__init__(**values)

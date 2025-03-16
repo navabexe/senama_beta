@@ -10,10 +10,11 @@ class LoginRequest(BaseModel):
     Data model for user login request.
     """
     phone_number: str = Field(..., example="+989123456789", description="User's phone number in international format.")
+    role: str = Field(..., example="vendor", description="User role: 'user' or 'vendor'")
 
     class Config:
         json_schema_extra = {
-            "example": {"phone_number": "+989123456789"}
+            "example": {"phone_number": "+989123456789", "role": "vendor"}
         }
 
     @classmethod
@@ -26,15 +27,14 @@ class LoginRequest(BaseModel):
 
 class OTPResponse(BaseModel):
     """
-    Data model for OTP request response, including a unique OTP identifier and action type.
+    Data model for OTP request response.
     """
     message: str = Field(..., example="OTP sent for login.", description="Response message")
-    otp_id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000", description="Unique OTP identifier")
     action: str = Field(..., example="login", description="Action type: 'login' or 'register'")
 
     class Config:
         json_schema_extra = {
-            "example": {"message": "OTP sent for login.", "otp_id": "550e8400-e29b-41d4-a716-446655440000", "action": "login"}
+            "example": {"message": "OTP sent for login.", "action": "login"}
         }
 
 class OTPVerificationRequest(BaseModel):
@@ -43,11 +43,11 @@ class OTPVerificationRequest(BaseModel):
     """
     phone_number: str = Field(..., example="+989123456789", description="User's phone number in international format.")
     otp_code: str = Field(..., min_length=6, max_length=6, example="123456", description="6-digit OTP code.")
-    otp_id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000", description="Unique OTP identifier")
+    role: str = Field(..., example="vendor", description="User role: 'user' or 'vendor'")
 
     class Config:
         json_schema_extra = {
-            "example": {"phone_number": "+989123456789", "otp_code": "123456", "otp_id": "550e8400-e29b-41d4-a716-446655440000"}
+            "example": {"phone_number": "+989123456789", "otp_code": "123456", "role": "vendor"}
         }
 
     @classmethod
@@ -69,8 +69,8 @@ class TokenResponse(BaseModel):
             "example": {
                 "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
                 "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                "message": "Registration completed successfully.",
-                "action": "register"
+                "message": "Login successful.",
+                "action": "login"
             }
         }
 

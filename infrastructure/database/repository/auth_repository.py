@@ -2,6 +2,8 @@
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List
+
+import pymongo
 from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorCollection
 
@@ -123,34 +125,6 @@ class AuthRepository:
             logger.error(f"Unexpected error in get_user_by_username for {username}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error retrieving user.")
 
-    async def create_user(self, phone_number: str) -> str:
-        """
-        Creates a new user in the database with a phone number.
-        """
-        try:
-            normalized_phone = self._normalize_phone(phone_number)
-            if not normalized_phone:
-                logger.error("Phone number is empty in create_user.")
-                raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
-            user = {
-                "phone_number": normalized_phone,
-                "role": "user",
-                "status": "active",
-                "created_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc)
-            }
-            result = await self.users.insert_one(user)
-            if not result.inserted_id:
-                logger.error(f"Failed to insert user for phone: {normalized_phone}")
-                raise HTTPException(status_code=500, detail="Failed to create user.")
-            logger.info(f"User created with ID {result.inserted_id} for phone: {normalized_phone}")
-            return str(result.inserted_id)
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in create_user for {phone_number}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error creating user.")
-
     async def update_user_status(self, user_id: str, status: str):
         """
         Updates the status of a user in the database.
@@ -204,17 +178,40 @@ class AuthRepository:
         try:
             normalized_phone = self._normalize_phone(phone_number)
             if not normalized_phone:
-                logger.error("Phone number is empty in get_user_by_phone.")
                 raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
             user = await self.users.find_one({"phone_number": normalized_phone})
-            logger.debug(f"Database query for phone {normalized_phone}: {user}")
-            if user:
-                logger.debug(f"User found for phone: {normalized_phone}")
-            else:
-                logger.debug(f"No user found for phone: {normalized_phone}")
+            logger.debug(f"User lookup for phone {normalized_phone}: {user}")
             return user
         except HTTPException as e:
             raise e
         except Exception as e:
-            logger.error(f"Unexpected error in get_user_by_phone for {phone_number}: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error in get_user_by_phone: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error retrieving user.")
+
+    async def create_user(self, phone_number: str, role: str = "user") -> str:
+        normalized_phone = self._normalize_phone(phone_number)
+        if not normalized_phone or not role:
+            raise HTTPException(status_code=400, detail="Phone number and role cannot be empty.")
+
+        existing_user = await self.users.find_one({"phone_number": normalized_phone})
+        if existing_user:
+            current_roles = existing_user.get("roles", [])
+            if role not in current_roles:
+                current_roles.append(role)
+                await self.users.update_one(
+                    {"_id": existing_user["_id"]},
+                    {"$set": {"roles": current_roles, "updated_at": datetime.now(timezone.utc)}}
+                )
+                logger.info(f"Role {role} added to existing user: {normalized_phone}")
+            return str(existing_user["_id"])
+
+        user = {
+            "phone_number": normalized_phone,
+            "roles": [role],
+            "status": "active",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
+        }
+        result = await self.users.insert_one(user)
+        logger.info(f"User created with ID {result.inserted_id} for phone: {normalized_phone} with role: {role}")
+        return str(result.inserted_id)

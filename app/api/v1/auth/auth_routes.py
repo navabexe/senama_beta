@@ -9,6 +9,7 @@ from app.services.auth.otp_service import OTPService
 from app.services.auth.token_service import TokenService
 from app.domain.schemas.auth_schema import LoginRequest, OTPVerificationRequest, TokenResponse, OTPResponse
 from app.middleware.rbac import role_based_access_control, get_jwt_manager
+from user_agents import parse
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def send_otp(phone_number: str = Body(..., embed=True)):
         otp_code, otp_id = auth_service.otp_manager.generate_otp(phone_number, otp_type)
         await auth_service.sms_service.send_sms(phone_number, f"Your OTP code: {otp_code}")
         logger.info(f"OTP sent successfully to phone: {phone_number}, action: {otp_type}")
-        return OTPResponse(message=f"OTP sent for {otp_type}.", otp_id=otp_id, action=otp_type)
+        return OTPResponse(message=f"OTP sent for {otp_type}.", action=otp_type)
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -130,7 +131,7 @@ async def send_otp(phone_number: str = Body(..., embed=True)):
         raise HTTPException(status_code=500, detail="Internal server error sending OTP.")
 
 async def user_role_check(request: Request, jwt_manager: JWTManager = Depends(get_jwt_manager)):
-    await role_based_access_control(request, ["user"], jwt_manager)
+    await role_based_access_control(request, ["user", "vendor"], jwt_manager)
     return True
 
 @router.get("/sessions", response_model=dict, dependencies=[Depends(user_role_check)])
@@ -186,7 +187,7 @@ async def login_with_password(username: str = Body(...), password: str = Body(..
         user_id = str(user["_id"])
         roles = [user.get("role", "user")]
 
-        access_token = auth_service.jwt_manager.create_access_token(user_id, roles)
+        access_token = auth_service.jwt_manager.create_access_token(user_id, roles, user.get("phone_number", "unknown"))
         refresh_token = auth_service.jwt_manager.create_refresh_token(user_id)
 
         session_id = f"session-{datetime.now(timezone.utc).isoformat()}"
@@ -198,10 +199,10 @@ async def login_with_password(username: str = Body(...), password: str = Body(..
             "os": user_agent.os.family,
             "ip": http_request.client.host if http_request else "127.0.0.1"
         }
-        auth_service.redis_service.store_session(user_id, session_id, device_info)
+        await auth_service.redis_service.store_session(user_id, session_id, device_info)
 
         logger.info(f"User logged in with username: {username}")
-        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+        return TokenResponse(access_token=access_token, refresh_token=refresh_token, message="Login successful.", action="login")
     except HTTPException as e:
         raise e
     except Exception as e:

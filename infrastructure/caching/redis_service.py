@@ -260,11 +260,12 @@ class RedisService:
             logger.error(f"Unexpected error in delete_all_sessions for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error deleting all sessions.")
 
-    async def store_session(self, user_id: str, session_id: str, device_info: dict, expiry_hours: int = 24):
+    async def store_session(self, user_id: str, session_id: str, device_info: dict, role: str, expiry_hours: int = 24):
         try:
-            if not user_id or not session_id or not device_info:
-                logger.error("User ID, session ID, or device info is empty in store_session.")
-                raise HTTPException(status_code=400, detail="User ID, session ID, and device info cannot be empty.")
+            if not user_id or not session_id or not device_info or not role:
+                logger.error("User ID, session ID, device info, or role is empty in store_session.")
+                raise HTTPException(status_code=400,
+                                    detail="User ID, session ID, device info, and role cannot be empty.")
             if expiry_hours <= 0:
                 logger.error(f"Invalid expiry_hours: {expiry_hours}")
                 raise HTTPException(status_code=400, detail="Expiry hours must be positive.")
@@ -282,8 +283,9 @@ class RedisService:
 
                 key = f"session:{user_id}:{session_id}"
                 device_info["created_at"] = datetime.now(timezone.utc).isoformat()
+                device_info["role"] = role  # اضافه کردن نقش به اطلاعات سشن
                 self.client.setex(key, timedelta(hours=expiry_hours), json.dumps(device_info))
-                logger.debug(f"Stored session {session_id} for user {user_id}")
+                logger.debug(f"Stored session {session_id} for user {user_id} with role {role}")
             else:
                 logger.warning(f"Redis unavailable, skipping store_session for user {user_id}")
         except HTTPException as e:

@@ -1,4 +1,7 @@
+# app/services/auth/auth_service.py
 import logging
+from datetime import datetime, timezone
+
 from fastapi import HTTPException, Request
 from user_agents import parse
 from app.security.otp import OTPManager
@@ -10,6 +13,7 @@ from infrastructure.caching.blacklist import BlacklistService
 from infrastructure.external.sms_service import SMSService
 from infrastructure.external.notification_service import NotificationService
 from pymongo.errors import DuplicateKeyError
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +64,19 @@ class AuthService:
                 raise HTTPException(status_code=400, detail="User ID cannot be empty.")
 
             sessions = self.redis_service.get_user_sessions(user_id)
-            logger.info(f"Retrieved {len(sessions)} active sessions for user: {user_id}")
-            return {"active_sessions": list(sessions.values())}
+            active_sessions = [
+                {
+                    "device": session.get("device"),
+                    "browser": session.get("browser"),
+                    "os": session.get("os"),
+                    "ip": session.get("ip"),
+                    "created_at": session.get("created_at"),
+                    "role": session.get("role")  # اضافه کردن نقش به خروجی
+                }
+                for session in sessions.values()
+            ]
+            logger.info(f"Retrieved {len(active_sessions)} active sessions for user: {user_id}")
+            return {"active_sessions": active_sessions}
         except HTTPException as e:
             raise e
         except Exception as e:
@@ -141,89 +156,86 @@ class AuthService:
             raise HTTPException(status_code=500, detail="Internal server error during force logout.")
 
     async def login(self, request: LoginRequest, device_info: dict = None) -> dict:
-        try:
-            phone_number = self._normalize_phone(request.phone_number)
-            if not phone_number:
-                logger.error("Phone number is empty in login.")
-                raise HTTPException(status_code=400, detail="Phone number cannot be empty.")
+        phone_number = self._normalize_phone(request.phone_number)
+        role = request.role
+        if not phone_number or not role:
+            raise HTTPException(status_code=400, detail="Phone number and role cannot be empty.")
 
-            # دیباگ برای چک کردن دیتابیس
-            user = await self.auth_repository.get_user_by_phone(phone_number)
-            logger.debug(f"User lookup result for {phone_number}: {user}")
+        user = await self.auth_repository.get_user_by_phone(phone_number)
+        otp_type = "login" if user else "register"
+        otp_code, otp_id = self.otp_manager.generate_otp(phone_number, otp_type, device_info)
 
-            if user:
-                user_status = user.get("status")
-                user_role = user.get("role", "user")
-                if user_status == "blocked":
-                    logger.warning(f"Blocked account attempted login: {phone_number}")
-                    raise HTTPException(status_code=403, detail="Your account is blocked.")
-                if user_role == "vendor" and user_status == "pending":
-                    logger.warning(f"Pending vendor account attempted login: {phone_number}")
-                    raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
+        if user:
+            user_id = str(user["_id"])
+            roles = user.get("roles", [])
+            if role not in roles:
+                roles.append(role)
+                await self.auth_repository.users.update_one(
+                    {"_id": user["_id"]},
+                    {"$set": {"roles": roles, "updated_at": datetime.now(timezone.utc)}}
+                )
+        else:
+            user_id = f"temp-{phone_number}"
+            roles = [role]
 
-                otp_code, otp_id = self.otp_manager.generate_otp(phone_number, "login", device_info)
-                await self.sms_service.send_sms(phone_number, f"Your login OTP code: {otp_code}")
-                logger.info(f"Login OTP sent to existing user: {phone_number}")
-                return {"message": "OTP sent for login.", "otp_id": otp_id, "action": "login"}
-            else:
-                otp_code, otp_id = self.otp_manager.generate_otp(phone_number, "register", device_info)
-                await self.sms_service.send_sms(phone_number, f"Your registration OTP code: {otp_code}")
-                logger.info(f"Registration OTP sent to new user: {phone_number}")
-                return {"message": "OTP sent for registration.", "otp_id": otp_id, "action": "register"}
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in login for {phone_number}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error during login.")
+        temp_access_token = self.jwt_manager.create_access_token(user_id, roles, phone_number, temp=True)
+        redis_key = f"login:{phone_number}:{otp_id}"
+        redis_data = {"otp_id": otp_id, "access_token": temp_access_token, "role": role}
+        self.redis_service.set_with_expiry(redis_key, json.dumps(redis_data), 600)
+
+        await self.sms_service.send_sms(phone_number, f"Your {otp_type} OTP code: {otp_code}")
+        logger.info(f"{otp_type.capitalize()} OTP sent to: {phone_number}")
+        return {"message": f"OTP sent for {otp_type}.", "action": otp_type}
 
     async def verify_otp(self, request: OTPVerificationRequest, http_request: Request = None):
         try:
             phone_number = self._normalize_phone(request.phone_number)
             otp_code = request.otp_code
-            otp_id = request.otp_id
-            logger.info(f"Received verify_otp request: phone={phone_number}, otp_code={otp_code}, otp_id={otp_id}")
-            if not phone_number or not otp_code or not otp_id:
-                logger.error("Phone number, OTP code, or OTP ID is empty in verify_otp.")
-                raise HTTPException(status_code=400, detail="Phone number, OTP code, and OTP ID are required.")
+            role = request.role  # نقش درخواست‌شده
+            if not phone_number or not otp_code or not role:
+                raise HTTPException(status_code=400, detail="Phone number, OTP code, and role are required.")
+
+            redis_keys = self.redis_service.client.keys(f"login:{phone_number}:*")
+            if not redis_keys:
+                raise HTTPException(status_code=400, detail="No valid OTP request found or expired.")
+
+            latest_key = redis_keys[-1]
+            stored_data = self.redis_service.get(latest_key)
+            if not stored_data:
+                raise HTTPException(status_code=400, detail="OTP data expired or not found.")
+
+            redis_data = json.loads(stored_data)
+            otp_id = redis_data["otp_id"]
 
             success, otp_type = self.otp_manager.verify_otp(phone_number, otp_code, otp_id)
             if not success:
-                logger.warning(f"OTP verification failed for phone: {phone_number}")
                 raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
 
             user = await self.auth_repository.get_user_by_phone(phone_number)
-            action = otp_type  # نوع اولیه OTP
-            message = ""
+            action = otp_type
 
-            if otp_type == "register":
+            if otp_type == "register" or (user and role not in user.get("roles", [])):
                 if not user:
-                    user_id = await self.auth_repository.create_user(phone_number)
-                    if not user_id:
-                        logger.error(f"Failed to create user for phone: {phone_number}")
-                        raise HTTPException(status_code=500, detail="Failed to create user account.")
-                    roles = ["user"]
+                    user_id = await self.auth_repository.create_user(phone_number, role)
+                    roles = [role]
                     message = "Registration completed successfully."
-                    logger.info(f"New user created with ID: {user_id} for phone: {phone_number}")
                 else:
-                    # اگر کاربر وجود دارد و OTP نوع register است، آن را به login تبدیل کن
-                    action = "login"
-                    message = "Login successful."
-                    logger.info(f"User already exists, treating register OTP as login for: {phone_number}")
-                user_id = str(user["_id"]) if user else user_id
-                roles = [user.get("role", "user")] if user else roles
-            elif otp_type == "login":
-                if not user:
-                    logger.warning(f"User not found during login attempt: {phone_number}")
-                    raise HTTPException(status_code=404, detail="This phone number is not registered.")
-                user_id = str(user["_id"])
-                roles = [user.get("role", "user")]
-                message = "Login successful."
-                logger.info(f"Existing user logged in with ID: {user_id} for phone: {phone_number}")
+                    user_id = str(user["_id"])
+                    roles = user.get("roles", [])
+                    if role not in roles:
+                        roles.append(role)
+                        await self.auth_repository.users.update_one(
+                            {"_id": user["_id"]},
+                            {"$set": {"roles": roles, "updated_at": datetime.now(timezone.utc)}}
+                        )
+                    message = "Role added and login successful."
             else:
-                logger.error(f"Invalid OTP type: {otp_type}")
-                raise HTTPException(status_code=500, detail="Internal server error: Invalid OTP type.")
+                user_id = str(user["_id"])
+                roles = user.get("roles", [])
+                message = "Login successful."
+                action = "login"
 
-            access_token = self.jwt_manager.create_access_token(user_id, roles)
+            access_token = self.jwt_manager.create_access_token(user_id, roles, phone_number)
             refresh_token = self.jwt_manager.create_refresh_token(user_id)
 
             session_id = f"session-{otp_id}"
@@ -235,9 +247,10 @@ class AuthService:
                 "os": user_agent.os.family,
                 "ip": http_request.client.host if http_request else "127.0.0.1"
             }
-            await self.redis_service.store_session(user_id, session_id, device_info)
+            # پاس دادن نقش به store_session
+            await self.redis_service.store_session(user_id, session_id, device_info, role)
+            self.redis_service.delete(latest_key)
 
-            logger.info(f"Tokens issued for phone: {phone_number}, action: {action}")
             return TokenResponse(
                 access_token=access_token,
                 refresh_token=refresh_token,

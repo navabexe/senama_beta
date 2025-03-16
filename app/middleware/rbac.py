@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 def get_jwt_manager():
     return JWTManager()
 
+# app/middleware/rbac.py
 async def role_based_access_control(request: Request, required_roles: List[str], jwt_manager: JWTManager = Depends(get_jwt_manager)):
     try:
         token = request.headers.get("Authorization")
@@ -25,7 +26,9 @@ async def role_based_access_control(request: Request, required_roles: List[str],
             logger.error("Token is empty after splitting.")
             raise HTTPException(status_code=401, detail="Token is empty.")
 
+        logger.debug(f"Attempting to verify token: {token[:20]}...")
         payload = jwt_manager.verify_token(token, "access")
+        logger.debug(f"Token payload: {payload}")
         user_roles = payload.get("roles", [])
 
         if not isinstance(user_roles, list):
