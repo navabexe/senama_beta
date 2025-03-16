@@ -59,27 +59,20 @@ class OTPVerificationRequest(BaseModel):
             raise ValueError(f"Invalid OTPVerificationRequest data: {str(e)}")
 
 class TokenResponse(BaseModel):
-    """
-    Data model for authentication token response.
-    """
     access_token: str = Field(..., description="JWT access token.")
     refresh_token: str = Field(..., description="JWT refresh token.")
+    message: str = Field(..., description="Response message indicating action status.")
+    action: str = Field(..., description="Action type: 'login' or 'register'")
 
     class Config:
         json_schema_extra = {
             "example": {
                 "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "message": "Registration completed successfully.",
+                "action": "register"
             }
         }
-
-    @classmethod
-    def validate(cls, value):
-        try:
-            return super().validate(value)
-        except Exception as e:
-            logger.error(f"Validation error in TokenResponse: {str(e)}", exc_info=True)
-            raise ValueError(f"Invalid TokenResponse data: {str(e)}")
 
 class RefreshTokenRequest(BaseModel):
     """

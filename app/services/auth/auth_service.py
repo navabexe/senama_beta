@@ -140,72 +140,6 @@ class AuthService:
             logger.error(f"Unexpected error in force_logout for user {user_id}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error during force logout.")
 
-    async def verify_otp(self, request: OTPVerificationRequest, http_request: Request = None):
-        try:
-            phone_number = self._normalize_phone(request.phone_number)
-            otp_code = request.otp_code
-            otp_id = request.otp_id
-            logger.info(f"Received verify_otp request: phone={phone_number}, otp_code={otp_code}, otp_id={otp_id}")
-            if not phone_number or not otp_code or not otp_id:
-                logger.error("Phone number, OTP code, or OTP ID is empty in verify_otp.")
-                raise HTTPException(status_code=400, detail="Phone number, OTP code, and OTP ID are required.")
-
-            success, otp_type = self.otp_manager.verify_otp(phone_number, otp_code, otp_id)
-            if not success:
-                logger.warning(f"OTP verification failed for phone: {phone_number}")
-                raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
-
-            user = await self.auth_repository.get_user_by_phone(phone_number)
-            if otp_type == "register":
-                if not user:
-                    try:
-                        user_id = await self.auth_repository.create_user(phone_number)
-                        if not user_id:
-                            logger.error(f"Failed to create user for phone: {phone_number}")
-                            raise HTTPException(status_code=500, detail="Failed to create user account.")
-                        roles = ["user"]
-                        logger.info(f"New user created with ID: {user_id} for phone: {phone_number}")
-                    except DuplicateKeyError:
-                        logger.warning(f"Duplicate registration attempt for phone: {phone_number}")
-                        raise HTTPException(status_code=400, detail="This phone number is already registered.")
-                else:
-                    logger.info(f"User already exists, treating register OTP as login for: {phone_number}")
-                user_id = str(user["_id"]) if user else user_id
-                roles = [user.get("role", "user")] if user else roles
-            elif otp_type == "login":
-                if not user:
-                    logger.warning(f"User not found during login attempt: {phone_number}")
-                    raise HTTPException(status_code=404, detail="This phone number is not registered.")
-                user_id = str(user["_id"])
-                roles = [user.get("role", "user")]
-                logger.info(f"Existing user logged in with ID: {user_id} for phone: {phone_number}")
-            else:
-                logger.error(f"Invalid OTP type: {otp_type}")
-                raise HTTPException(status_code=500, detail="Internal server error: Invalid OTP type.")
-
-            access_token = self.jwt_manager.create_access_token(user_id, roles)
-            refresh_token = self.jwt_manager.create_refresh_token(user_id)
-
-            session_id = f"session-{otp_id}"
-            user_agent_str = http_request.headers.get("User-Agent", "unknown") if http_request else "unknown"
-            user_agent = parse(user_agent_str)
-            device_info = {
-                "device": user_agent.device.family,
-                "browser": user_agent.browser.family,
-                "os": user_agent.os.family,
-                "ip": http_request.client.host if http_request else "127.0.0.1"
-            }
-            # اینجا await اضافه شده
-            await self.redis_service.store_session(user_id, session_id, device_info)
-
-            logger.info(f"Tokens issued for phone: {phone_number}, action: {otp_type}")
-            return TokenResponse(access_token=access_token, refresh_token=refresh_token)
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error in verify_otp for {phone_number}: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error verifying OTP.")
-
     async def login(self, request: LoginRequest, device_info: dict = None) -> dict:
         try:
             phone_number = self._normalize_phone(request.phone_number)
@@ -241,3 +175,77 @@ class AuthService:
         except Exception as e:
             logger.error(f"Unexpected error in login for {phone_number}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error during login.")
+
+    async def verify_otp(self, request: OTPVerificationRequest, http_request: Request = None):
+        try:
+            phone_number = self._normalize_phone(request.phone_number)
+            otp_code = request.otp_code
+            otp_id = request.otp_id
+            logger.info(f"Received verify_otp request: phone={phone_number}, otp_code={otp_code}, otp_id={otp_id}")
+            if not phone_number or not otp_code or not otp_id:
+                logger.error("Phone number, OTP code, or OTP ID is empty in verify_otp.")
+                raise HTTPException(status_code=400, detail="Phone number, OTP code, and OTP ID are required.")
+
+            success, otp_type = self.otp_manager.verify_otp(phone_number, otp_code, otp_id)
+            if not success:
+                logger.warning(f"OTP verification failed for phone: {phone_number}")
+                raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+            user = await self.auth_repository.get_user_by_phone(phone_number)
+            action = otp_type  # نوع اولیه OTP
+            message = ""
+
+            if otp_type == "register":
+                if not user:
+                    user_id = await self.auth_repository.create_user(phone_number)
+                    if not user_id:
+                        logger.error(f"Failed to create user for phone: {phone_number}")
+                        raise HTTPException(status_code=500, detail="Failed to create user account.")
+                    roles = ["user"]
+                    message = "Registration completed successfully."
+                    logger.info(f"New user created with ID: {user_id} for phone: {phone_number}")
+                else:
+                    # اگر کاربر وجود دارد و OTP نوع register است، آن را به login تبدیل کن
+                    action = "login"
+                    message = "Login successful."
+                    logger.info(f"User already exists, treating register OTP as login for: {phone_number}")
+                user_id = str(user["_id"]) if user else user_id
+                roles = [user.get("role", "user")] if user else roles
+            elif otp_type == "login":
+                if not user:
+                    logger.warning(f"User not found during login attempt: {phone_number}")
+                    raise HTTPException(status_code=404, detail="This phone number is not registered.")
+                user_id = str(user["_id"])
+                roles = [user.get("role", "user")]
+                message = "Login successful."
+                logger.info(f"Existing user logged in with ID: {user_id} for phone: {phone_number}")
+            else:
+                logger.error(f"Invalid OTP type: {otp_type}")
+                raise HTTPException(status_code=500, detail="Internal server error: Invalid OTP type.")
+
+            access_token = self.jwt_manager.create_access_token(user_id, roles)
+            refresh_token = self.jwt_manager.create_refresh_token(user_id)
+
+            session_id = f"session-{otp_id}"
+            user_agent_str = http_request.headers.get("User-Agent", "unknown") if http_request else "unknown"
+            user_agent = parse(user_agent_str)
+            device_info = {
+                "device": user_agent.device.family,
+                "browser": user_agent.browser.family,
+                "os": user_agent.os.family,
+                "ip": http_request.client.host if http_request else "127.0.0.1"
+            }
+            await self.redis_service.store_session(user_id, session_id, device_info)
+
+            logger.info(f"Tokens issued for phone: {phone_number}, action: {action}")
+            return TokenResponse(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                message=message,
+                action=action
+            )
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error in verify_otp for {phone_number}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error verifying OTP.")
